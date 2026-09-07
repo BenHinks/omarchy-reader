@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Install only integration files; the launcher continues to run this checkout.
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+applications_dir="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+icons_dir="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+desktop_file="$applications_dir/org.omarchy.Reader.desktop"
+
+mkdir -p "$applications_dir" "$icons_dir"
+sed "s|@PROJECT_DIR@|$project_dir|g" \
+  "$project_dir/data/org.omarchy.Reader.desktop.in" > "$desktop_file"
+install -m 0644 "$project_dir/data/org.omarchy.Reader.svg" \
+  "$icons_dir/org.omarchy.Reader.svg"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$applications_dir"
+fi
+
+echo "Installed Omarchy Reader in the desktop Apps list."

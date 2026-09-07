@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Remove the user-local desktop integration installed by install-desktop.
+# Books and application state are intentionally retained.
+set -euo pipefail
+
+data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
+applications_dir="$data_home/applications"
+desktop_file="$applications_dir/org.omarchy.Reader.desktop"
+icon_file="$data_home/icons/hicolor/scalable/apps/org.omarchy.Reader.svg"
+
+rm -f -- "$desktop_file" "$icon_file"
+
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database "$applications_dir"
+fi
+
+echo "Removed Omarchy Reader from the desktop Apps list."
+echo "Your books and reading data were kept. See README.md for their locations."

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Reader
+GenericName=Ebook Reader
+Comment=Read ebooks, PDFs, and digital comics
+Exec=@PROJECT_DIR@/run %U
+Icon=org.omarchy.Reader
+Terminal=false
+Categories=Office;Viewer;
+MimeType=application/epub+zip;application/pdf;application/vnd.comicbook+zip;application/x-cbz;application/x-mobipocket-ebook;application/vnd.amazon.mobi8-ebook;application/x-fictionbook+xml;application/x-zip-compressed-fb2;
+StartupNotify=true
+StartupWMClass=org.omarchy.Reader
+Keywords=ebook;reader;epub;pdf;comic;cbz;zip;mobi;azw3;fb2;books;
