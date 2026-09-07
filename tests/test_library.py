@@ -10,7 +10,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from library import (
-    InvalidBook, InvalidComic, InvalidEpub, InvalidFb2, InvalidMobi, InvalidPdf, Library,
+    BUILTIN_CATALOGS, InvalidBook, InvalidComic, InvalidEpub, InvalidFb2, InvalidMobi,
+    InvalidPdf, Library,
     list_comic_pages, read_comic_metadata, read_comic_page,
     read_epub_metadata, read_fb2_metadata, read_mobi_metadata, read_pdf_metadata,
 )
@@ -106,6 +107,7 @@ class LibraryTests(unittest.TestCase):
             library.remove_book(book.id)
             self.assertEqual(library.list_books(), [])
             self.assertFalse(book.path.exists())
+            library.connection.close()
 
     def test_rejects_non_epub_zip(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -149,7 +151,7 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(InvalidPdf):
                 read_pdf_metadata(invalid)
 
-            unknown = root / "book.txt"
+            unknown = root / "book.rtf"
             unknown.write_text("not a book")
             library = Library(root / "data", root / "Books")
             with self.assertRaises(InvalidBook):
@@ -233,6 +235,28 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(InvalidFb2):
                 read_fb2_metadata(path)
 
+    def test_imports_text_markdown_and_html_documents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = Library(root / "data", root / "Books")
+            sources = {
+                "notes.txt": b"Plain text",
+                "guide.md": b"# Markdown Guide\n\nRead me.",
+                "page.html": b"<title>HTML Page</title><p>Read me.</p>",
+            }
+            for filename, content in sources.items():
+                source = root / filename
+                source.write_bytes(content)
+                book, created = library.import_book(source)
+                self.assertTrue(created)
+                self.assertEqual(book.format, source.suffix[1:])
+                self.assertTrue(book.path.exists())
+            self.assertEqual(
+                {book.title for book in library.list_books()},
+                {"notes", "Markdown Guide", "HTML Page"},
+            )
+            library.connection.close()
+
     def test_migrates_hidden_managed_book_to_visible_library(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -250,6 +274,7 @@ class LibraryTests(unittest.TestCase):
             self.assertTrue(migrated.path.exists())
             self.assertFalse(book.path.exists())
             self.assertEqual(migrated.progress_cfi, "epubcfi(/6/2!/4)")
+            visible.connection.close()
 
     def test_stores_generic_catalog_connection_without_password(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -258,8 +283,27 @@ class LibraryTests(unittest.TestCase):
             catalog = library.add_catalog(
                 "My Catalog", "https://books.example/opds", "reader"
             )
-            self.assertEqual(library.list_catalogs(), [catalog])
+            self.assertEqual(library.list_catalogs(), [catalog, *BUILTIN_CATALOGS])
             self.assertEqual(catalog.username, "reader")
+            library.connection.close()
+
+    def test_lists_builtin_catalogs_when_no_user_catalogs_exist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = Library(root / "data", root / "Books")
+            self.assertEqual(library.list_catalogs(), list(BUILTIN_CATALOGS))
+            self.assertTrue(all(catalog.is_builtin for catalog in BUILTIN_CATALOGS))
+            library.connection.close()
+
+    def test_user_catalog_replaces_builtin_with_the_same_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = Library(root / "data", root / "Books")
+            custom = library.add_catalog(
+                "My Gutenberg", BUILTIN_CATALOGS[0].url.rstrip("/"), ""
+            )
+            self.assertEqual(library.list_catalogs(), [custom, *BUILTIN_CATALOGS[1:]])
+            library.connection.close()
 
 
 if __name__ == "__main__":

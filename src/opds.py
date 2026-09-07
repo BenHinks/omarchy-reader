@@ -1,4 +1,4 @@
-"""Fetch and parse the supported subset of OPDS 1.x catalogs.
+"""Fetch and parse DRM-free publications from OPDS 1.x and 2 catalogs.
 
 Network operations are synchronous so callers can decide how to schedule them;
 the GTK front end runs them on worker threads.  Basic-auth credentials exist
@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -17,6 +18,7 @@ from urllib.parse import urljoin, urlsplit
 
 
 ATOM = "{http://www.w3.org/2005/Atom}"
+OPDS = "{http://opds-spec.org/2010/catalog}"
 EPUB_MIME = "application/epub+zip"
 PDF_MIME = "application/pdf"
 CBZ_MIME = "application/vnd.comicbook+zip"
@@ -25,11 +27,22 @@ MOBI_MIME = "application/x-mobipocket-ebook"
 AZW3_MIME = "application/vnd.amazon.mobi8-ebook"
 FB2_MIME = "application/x-fictionbook+xml"
 FBZ_MIME = "application/x-zip-compressed-fb2"
+TXT_MIME = "text/plain"
+MARKDOWN_MIME = "text/markdown"
+MARKDOWN_MIME_ALIASES = (MARKDOWN_MIME, "text/x-markdown")
+HTML_MIME = "text/html"
 SUPPORTED_BOOK_TYPES = (
     EPUB_MIME, PDF_MIME, *CBZ_MIME_ALIASES,
     MOBI_MIME, AZW3_MIME, FB2_MIME, FBZ_MIME,
+    TXT_MIME, *MARKDOWN_MIME_ALIASES, HTML_MIME,
 )
 ACQUISITION_REL = "http://opds-spec.org/acquisition"
+OPEN_ACCESS_REL = f"{ACQUISITION_REL}/open-access"
+FREE_ACQUISITION_RELS = {
+    "download", "acquisition", ACQUISITION_REL, OPEN_ACCESS_REL,
+}
+OPDS_2_MIME = "application/opds+json"
+OPDS_1_MIME = "application/atom+xml;profile=opds-catalog"
 MAX_FEED_PAGES = 100
 MAX_FEED_ENTRIES = 20_000
 
@@ -86,8 +99,8 @@ def _text(parent: ET.Element, path: str) -> str:
     return "" if node is None or node.text is None else node.text.strip()
 
 
-def parse_feed(data: bytes, base_url: str) -> OpdsFeed:
-    """Parse an Atom feed and retain supported acquisitions and navigation."""
+def _parse_atom_feed(data: bytes, base_url: str) -> OpdsFeed:
+    """Parse OPDS 1 Atom while retaining direct, unpriced acquisitions."""
     try:
         root = ET.fromstring(data)
     except ET.ParseError as error:
@@ -105,7 +118,9 @@ def parse_feed(data: bytes, base_url: str) -> OpdsFeed:
         for link in links:
             media_type = link.get("type", "").split(";", 1)[0].strip()
             href = link.get("href")
-            if (not link.get("rel", "").startswith(ACQUISITION_REL)
+            if (not (set(link.get("rel", "").split()) & FREE_ACQUISITION_RELS)
+                    or link.find(f"{OPDS}price") is not None
+                    or link.find(f"{OPDS}indirectAcquisition") is not None
                     or media_type not in SUPPORTED_BOOK_TYPES or not href):
                 continue
             absolute_href = urljoin(base_url, href)
@@ -139,6 +154,189 @@ def parse_feed(data: bytes, base_url: str) -> OpdsFeed:
     )
 
 
+def _relations(link: dict) -> set[str]:
+    """Normalize an OPDS 2 link's single or multiple relations."""
+    relation = link.get("rel", [])
+    if isinstance(relation, str):
+        return set(relation.split())
+    if isinstance(relation, list):
+        return {item for item in relation if isinstance(item, str)}
+    return set()
+
+
+def _display_text(value, fallback: str = "") -> str:
+    """Select readable text from a plain or localized manifest value."""
+    if isinstance(value, str):
+        return value.strip() or fallback
+    if isinstance(value, dict):
+        for key in ("en", "und"):
+            if isinstance(value.get(key), str) and value[key].strip():
+                return value[key].strip()
+        for candidate in value.values():
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return fallback
+
+
+def _author_text(value) -> str:
+    """Flatten the contributor forms allowed by publication manifests."""
+    contributors = value if isinstance(value, list) else [value]
+    names: list[str] = []
+    for contributor in contributors:
+        if isinstance(contributor, str):
+            name = contributor.strip()
+        elif isinstance(contributor, dict):
+            name = _display_text(contributor.get("name"))
+        else:
+            name = ""
+        if name and name not in names:
+            names.append(name)
+    return ", ".join(names)
+
+
+def _link_size(link: dict) -> int | None:
+    size = link.get("length")
+    if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
+        return size
+    return None
+
+
+def _is_direct_free_acquisition(link: dict) -> bool:
+    """Accept free-compatible links with no price, DRM, or intermediary flow."""
+    if not (_relations(link) & FREE_ACQUISITION_RELS):
+        return False
+    properties = link.get("properties")
+    if not isinstance(properties, dict):
+        return True
+    return not any(
+        marker in properties for marker in ("price", "encrypted", "indirectAcquisition")
+    )
+
+
+def _publication_entry(publication: dict, base_url: str) -> OpdsEntry | None:
+    metadata = publication.get("metadata")
+    links = publication.get("links")
+    if not isinstance(metadata, dict) or not isinstance(links, list):
+        return None
+    acquisitions: list[OpdsAcquisition] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links:
+        if not isinstance(link, dict) or not _is_direct_free_acquisition(link):
+            continue
+        href = link.get("href")
+        media_type = link.get("type", "")
+        if not isinstance(href, str) or not href or not isinstance(media_type, str):
+            continue
+        media_type = media_type.split(";", 1)[0].strip()
+        if media_type not in SUPPORTED_BOOK_TYPES:
+            continue
+        absolute_href = urljoin(base_url, href)
+        identity = absolute_href, media_type
+        if identity in seen:
+            continue
+        seen.add(identity)
+        acquisitions.append(OpdsAcquisition(absolute_href, media_type, _link_size(link)))
+    if not acquisitions:
+        return None
+    first = acquisitions[0]
+    return OpdsEntry(
+        _display_text(metadata.get("title"), "Untitled"),
+        _author_text(metadata.get("author")),
+        first.href,
+        "book",
+        first.media_type,
+        first.size,
+        tuple(acquisitions),
+    )
+
+
+def _navigation_entries(links, base_url: str) -> list[OpdsEntry]:
+    entries: list[OpdsEntry] = []
+    if not isinstance(links, list):
+        return entries
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        href = link.get("href")
+        media_type = link.get("type", "")
+        if (not isinstance(href, str) or not href
+                or (media_type and media_type.split(";", 1)[0].strip() != OPDS_2_MIME)):
+            continue
+        entries.append(OpdsEntry(
+            _display_text(link.get("title"), "Untitled section"),
+            "",
+            urljoin(base_url, href),
+            "navigation",
+        ))
+    return entries
+
+
+def _parse_opds2_feed(data: bytes, base_url: str) -> OpdsFeed:
+    """Parse an OPDS 2 JSON feed into the reader's shared catalog model."""
+    try:
+        root = json.loads(data.decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise OpdsError("The server returned invalid OPDS JSON") from error
+    if not isinstance(root, dict) or not any(
+        key in root for key in ("navigation", "publications", "groups")
+    ):
+        raise OpdsError("The server response is not an OPDS 2 feed")
+
+    metadata = root.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    entries = _navigation_entries(root.get("navigation"), base_url)
+    publications = root.get("publications")
+    if isinstance(publications, list):
+        entries.extend(
+            entry for publication in publications
+            if isinstance(publication, dict)
+            and (entry := _publication_entry(publication, base_url)) is not None
+        )
+
+    groups = root.get("groups")
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            entries.extend(_navigation_entries(group.get("navigation"), base_url))
+            group_publications = group.get("publications")
+            if isinstance(group_publications, list):
+                entries.extend(
+                    entry for publication in group_publications
+                    if isinstance(publication, dict)
+                    and (entry := _publication_entry(publication, base_url)) is not None
+                )
+
+    facets = root.get("facets")
+    if isinstance(facets, list):
+        for facet in facets:
+            if isinstance(facet, dict):
+                entries.extend(_navigation_entries(facet.get("links"), base_url))
+
+    next_url = None
+    links = root.get("links")
+    if isinstance(links, list):
+        next_link = next((
+            link for link in links
+            if isinstance(link, dict) and "next" in _relations(link)
+            and isinstance(link.get("href"), str) and link["href"]
+        ), None)
+        if next_link is not None:
+            next_url = urljoin(base_url, next_link["href"])
+    return OpdsFeed(
+        _display_text(metadata.get("title"), "OPDS Catalog"),
+        tuple(entries),
+        next_url,
+    )
+
+
+def parse_feed(data: bytes, base_url: str) -> OpdsFeed:
+    """Detect and parse an OPDS 1 Atom or OPDS 2 JSON feed."""
+    if data.lstrip().startswith((b"{", b"[", b"\xef\xbb\xbf{", b"\xef\xbb\xbf[")):
+        return _parse_opds2_feed(data, base_url)
+    return _parse_atom_feed(data, base_url)
+
+
 def _request(url: str, username: str, password: str, accept: str) -> urllib.request.Request:
     scheme = urlsplit(url).scheme.lower()
     if scheme not in ("http", "https"):
@@ -154,7 +352,10 @@ def fetch_feed(url: str, username: str = "", password: str = "") -> OpdsFeed:
     """Fetch and parse one OPDS page with bounded response size and timeout."""
     try:
         with urllib.request.urlopen(
-            _request(url, username, password, "application/atom+xml;profile=opds-catalog"),
+            _request(
+                url, username, password,
+                f"{OPDS_2_MIME}, {OPDS_1_MIME};q=0.9, application/atom+xml;q=0.8",
+            ),
             timeout=20,
         ) as response:
             return parse_feed(response.read(10_000_000), response.geturl())

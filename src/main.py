@@ -7,6 +7,7 @@ WebKit/foliate-js ebook view, background OPDS work, and system-keyring access.
 from __future__ import annotations
 
 import json
+import html
 import mimetypes
 import os
 import sys
@@ -24,9 +25,11 @@ gi.require_version("Secret", "1")
 gi.require_version("WebKit", "6.0")
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk, Poppler, Secret, WebKit  # noqa: E402
 
+from document import DOCUMENT_EXTENSIONS, InvalidDocument, read_document
 from library import Book, Catalog, InvalidBook, InvalidComic, Library, list_comic_pages, read_comic_page
 from opds import (
-    AZW3_MIME, CBZ_MIME_ALIASES, FB2_MIME, FBZ_MIME, MOBI_MIME, PDF_MIME,
+    AZW3_MIME, CBZ_MIME_ALIASES, FB2_MIME, FBZ_MIME, HTML_MIME,
+    MARKDOWN_MIME_ALIASES, MOBI_MIME, PDF_MIME, TXT_MIME,
     OpdsAcquisition, OpdsEntry, OpdsError, download_book, fetch_complete_feed,
 )
 from theme import Theme
@@ -67,11 +70,21 @@ def format_name(media_type: str) -> str:
         return "FB2"
     if media_type == FBZ_MIME:
         return "FBZ"
+    if media_type == TXT_MIME:
+        return "TXT"
+    if media_type in MARKDOWN_MIME_ALIASES:
+        return "Markdown"
+    if media_type == HTML_MIME:
+        return "HTML"
     return "EPUB"
 
 
 def local_format_name(book: Book) -> str:
     """Return the display name for an already imported book's format."""
+    if book.format in ("md", "markdown"):
+        return "Markdown"
+    if book.format in ("html", "htm"):
+        return "HTML"
     return book.format.upper()
 
 
@@ -171,7 +184,7 @@ class ReaderWindow(Adw.ApplicationWindow):
         page = Adw.StatusPage(
             icon_name="accessories-text-editor-symbolic",
             title="Your library is empty",
-            description="Add a book from this device or an OPDS catalog.",
+            description="Add a book from a file or an OPDS catalog.",
         )
         add_button = Gtk.Button(label="Add Book", halign=Gtk.Align.CENTER)
         add_button.add_css_class("suggested-action")
@@ -309,7 +322,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             row.add_suffix(progress)
             remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
             remove.add_css_class("flat")
-            remove.set_tooltip_text(f"Remove {book.title} from this device")
+            remove.set_tooltip_text(f"Remove {book.title} from the library")
             remove.connect("clicked", self._confirm_remove_book, book)
             row.add_suffix(remove)
             row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
@@ -328,7 +341,7 @@ class ReaderWindow(Adw.ApplicationWindow):
 
         self.add_pages = Adw.ViewStack(vexpand=True)
         self.add_pages.add_titled_with_icon(
-            self._build_local_add_page(), "local", "From This Device", "folder-symbolic"
+            self._build_local_add_page(), "local", "From File", "folder-symbolic"
         )
         self.add_pages.add_titled_with_icon(
             self._build_opds_add_page(), "opds", "From OPDS", "web-browser-symbolic"
@@ -362,7 +375,7 @@ class ReaderWindow(Adw.ApplicationWindow):
         page = Adw.StatusPage(
             icon_name="accessories-dictionary-symbolic",
             title="Choose a book",
-            description="Select any supported ebook, PDF, or comic stored on this device.",
+            description="Select a supported ebook, PDF, comic, or text document.",
         )
         choose_button = Gtk.Button(label="Choose Book", halign=Gtk.Align.CENTER)
         choose_button.add_css_class("suggested-action")
@@ -504,6 +517,17 @@ class ReaderWindow(Adw.ApplicationWindow):
         for pattern in ("*.fb2", "*.FB2", "*.fbz", "*.FBZ", "*.fb2.zip", "*.FB2.ZIP"):
             fb2_filter.add_pattern(pattern)
         filters.append(fb2_filter)
+        document_filter = Gtk.FileFilter(name="Text, Markdown, and HTML documents")
+        document_filter.add_mime_type("text/plain")
+        document_filter.add_mime_type("text/markdown")
+        document_filter.add_mime_type("text/html")
+        for pattern in (
+            "*.txt", "*.TXT", "*.md", "*.MD", "*.markdown", "*.MARKDOWN",
+            "*.html", "*.HTML", "*.htm", "*.HTM",
+        ):
+            book_filter.add_pattern(pattern)
+            document_filter.add_pattern(pattern)
+        filters.append(document_filter)
         self.local_file_dialog = Gtk.FileDialog(
             title="Choose a book",
             accept_label="Add Book",
@@ -531,7 +555,7 @@ class ReaderWindow(Adw.ApplicationWindow):
                 self.add_dialog.present(self)
             else:
                 self._show_error("Could not select the book", error.message)
-        except (InvalidBook, OSError) as error:
+        except (InvalidBook, InvalidDocument, OSError) as error:
             self._show_error("Could not import the book", str(error))
         finally:
             self.local_file_dialog = None
@@ -556,6 +580,10 @@ class ReaderWindow(Adw.ApplicationWindow):
         for catalog in self.library.list_catalogs():
             row = Adw.ActionRow(title=catalog.name, subtitle=catalog.url, activatable=True)
             row.opds_search_text = f"{catalog.name} {catalog.url}".casefold()
+            if catalog.is_builtin:
+                built_in = Gtk.Label(label="Built-in")
+                built_in.add_css_class("dim-label")
+                row.add_suffix(built_in)
             row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
             row.connect("activated", lambda _row, item=catalog: self._open_catalog(item))
             self.opds_list.append(row)
@@ -564,7 +592,7 @@ class ReaderWindow(Adw.ApplicationWindow):
         add.add_prefix(Gtk.Image(icon_name="list-add-symbolic"))
         add.connect("activated", self._add_catalog_dialog)
         self.opds_list.append(add)
-        self.opds_title.set_label("Your catalogs")
+        self.opds_title.set_label("OPDS catalogs")
         self._update_opds_back_button()
 
     def _add_catalog_dialog(self, *_args) -> None:
@@ -575,7 +603,10 @@ class ReaderWindow(Adw.ApplicationWindow):
         password = Adw.PasswordEntryRow(title="Password (optional)")
         for row in (name, url, username, password):
             group.add(row)
-        dialog = Adw.AlertDialog(heading="Add OPDS catalog", body="Connect to a generic OPDS 1.x catalog.")
+        dialog = Adw.AlertDialog(
+            heading="Add OPDS catalog",
+            body="Connect to an OPDS 1.x catalog or an experimental OPDS 2 catalog.",
+        )
         dialog.set_extra_child(group)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("add", "Connect")
@@ -650,6 +681,8 @@ class ReaderWindow(Adw.ApplicationWindow):
         return GLib.SOURCE_REMOVE
 
     def _catalog_password(self, catalog: Catalog) -> str:
+        if catalog.is_builtin:
+            return ""
         return Secret.password_lookup_sync(
             SECRET_SCHEMA, {"catalog-id": str(catalog.id)}, None
         ) or ""
@@ -797,6 +830,12 @@ class ReaderWindow(Adw.ApplicationWindow):
                 extension = ".fb2"
             elif acquisition.media_type == FBZ_MIME:
                 extension = ".fbz"
+            elif acquisition.media_type == TXT_MIME:
+                extension = ".txt"
+            elif acquisition.media_type in MARKDOWN_MIME_ALIASES:
+                extension = ".md"
+            elif acquisition.media_type == HTML_MIME:
+                extension = ".html"
             else:
                 extension = ".epub"
             descriptor, filename = tempfile.mkstemp(suffix=extension)
@@ -838,7 +877,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             self.add_dialog.close()
             self._refresh_library()
             self._open_book(book)
-        except (InvalidBook, OSError) as error:
+        except (InvalidBook, InvalidDocument, OSError) as error:
             self._download_failed(str(error), button, progress)
         finally:
             path.unlink(missing_ok=True)
@@ -873,8 +912,40 @@ class ReaderWindow(Adw.ApplicationWindow):
             self._open_pdf(book)
         elif book.format in ("cbz", "zip"):
             self._open_comic(book)
+        elif f".{book.format}" in DOCUMENT_EXTENSIONS:
+            self._open_document(book)
         else:
             self._open_epub(book)
+
+    def _open_document(self, book: Book) -> None:
+        """Render a safe text-based document in the shared WebKit view."""
+        try:
+            document = read_document(book.path)
+            template = (PROJECT_DIR / "src/web/document.html").read_text(encoding="utf-8")
+        except (InvalidDocument, OSError) as error:
+            self._show_error("Could not open this document", str(error))
+            return
+
+        font_family = self.theme.font_family.replace("\\", "\\\\").replace('"', '\\"')
+        theme_style = "<style>:root {" + ";".join((
+            f"--background:{self.theme.background}",
+            f"--surface:{self.theme.surface}",
+            f"--foreground:{self.theme.foreground}",
+            f"--muted:{self.theme.muted}",
+            f"--accent:{self.theme.accent}",
+            f"--selection:{self.theme.selection}",
+            f'--reader-font:"{font_family}"',
+        )) + "}</style>"
+        page = template.replace("<!-- THEME_STYLE -->", theme_style)
+        page = page.replace("<!-- DOCUMENT_TITLE -->", html.escape(document.title))
+        page = page.replace("<!-- DOCUMENT_BODY -->", document.body_html)
+        page = page.replace(
+            '<body data-progress="0">',
+            f'<body data-progress="{book.progress_fraction:.6f}">',
+        )
+        self.web_view.load_html(page, "reader://app/")
+        self.stack.set_visible_child_name("epub-reader")
+        self._show_reader_header(book)
 
     def _open_epub(self, book: Book) -> None:
         reader_uri = "reader://app/reader.html"
@@ -1085,6 +1156,10 @@ class ReaderWindow(Adw.ApplicationWindow):
             self._show_error("Could not open this book", payload.get("message", "Unknown error"))
         elif payload.get("type") == "ready":
             self.web_view.grab_focus()
+        elif payload.get("type") == "external-link":
+            uri = payload.get("href", "")
+            if urlsplit(uri).scheme.lower() in ("http", "https", "mailto"):
+                Gio.AppInfo.launch_default_for_uri(uri, None)
 
     def _reader_load_failed(self, _view, _event, uri: str, error: GLib.Error) -> bool:
         self._show_error("The reader page failed to load", f"{error.message}\n\n{uri}")
@@ -1120,7 +1195,7 @@ class ReaderApplication(Adw.Application):
                     book, _created = window.library.import_book(Path(path))
                     window._refresh_library()
                     window._open_book(book)
-                except (InvalidBook, OSError) as error:
+                except (InvalidBook, InvalidDocument, OSError) as error:
                     window._show_error("Could not import the book", str(error))
                 break
 

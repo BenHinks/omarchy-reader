@@ -16,6 +16,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from document import DOCUMENT_EXTENSIONS, InvalidDocument, read_document
+
 
 MAX_UNCOMPRESSED_SIZE = 1_000_000_000
 MAX_COMIC_PAGE_SIZE = 100_000_000
@@ -94,12 +96,28 @@ class Book:
 
 @dataclass(frozen=True)
 class Catalog:
-    """A saved OPDS endpoint; passwords are intentionally stored elsewhere."""
+    """An OPDS endpoint; passwords for user records are stored elsewhere."""
 
     id: int
     name: str
     url: str
     username: str
+    is_builtin: bool = False
+
+
+# Negative IDs cannot collide with SQLite's positive automatically assigned IDs.
+# Built-ins are not persisted, which lets updates change them without migrating a
+# user's database and keeps user-created catalog records easy to distinguish.
+BUILTIN_CATALOGS = (
+    Catalog(
+        -1,
+        "Project Gutenberg",
+        "https://www.gutenberg.org/ebooks.opds/",
+        "",
+        True,
+    ),
+    Catalog(-2, "Unglue.it", "https://unglue.it/api/opds/", "", True),
+)
 
 
 def _safe_archive_name(name: str) -> bool:
@@ -393,9 +411,19 @@ class Library:
         return [self._book(row) for row in rows]
 
     def list_catalogs(self) -> list[Catalog]:
-        """List saved OPDS endpoints alphabetically."""
+        """List saved endpoints first, followed by non-duplicated built-ins."""
         rows = self.connection.execute("SELECT * FROM catalogs ORDER BY name COLLATE NOCASE").fetchall()
-        return [Catalog(row["id"], row["name"], row["url"], row["username"]) for row in rows]
+        user_catalogs = [
+            Catalog(row["id"], row["name"], row["url"], row["username"])
+            for row in rows
+        ]
+        user_urls = {catalog.url.rstrip("/") for catalog in user_catalogs}
+        available_builtins = [
+            catalog
+            for catalog in BUILTIN_CATALOGS
+            if catalog.url.rstrip("/") not in user_urls
+        ]
+        return user_catalogs + available_builtins
 
     def add_catalog(self, name: str, url: str, username: str) -> Catalog:
         """Save non-secret catalog details and return their new record."""
@@ -432,6 +460,15 @@ class Library:
             raise InvalidFb2("Only FB2 and compressed FB2 books are supported by this importer")
         return self._import_book(source, read_fb2_metadata(source), extension)
 
+    def import_document(self, source: Path) -> tuple[Book, bool]:
+        """Import a decoded TXT, Markdown, or sanitized HTML document."""
+        extension = _book_extension(source)
+        if extension not in DOCUMENT_EXTENSIONS:
+            raise InvalidDocument("Only TXT, Markdown, and HTML documents are supported")
+        document = read_document(source)
+        metadata = BookMetadata(document.title, document.author, "")
+        return self._import_book(source, metadata, extension)
+
     def import_book(
         self, source: Path, title: str | None = None, author: str | None = None
     ) -> tuple[Book, bool]:
@@ -448,9 +485,12 @@ class Library:
                 metadata = read_mobi_metadata(source)
             case ".fb2" | ".fbz" | ".fb2.zip":
                 metadata = read_fb2_metadata(source)
+            case ".txt" | ".md" | ".markdown" | ".html" | ".htm":
+                document = read_document(source)
+                metadata = BookMetadata(document.title, document.author, "")
             case _:
                 raise InvalidBook(
-                    "Only EPUB, PDF, CBZ/ZIP, MOBI/AZW3, and FB2 books are currently supported"
+                    "Only EPUB, PDF, CBZ/ZIP, MOBI/AZW3, FB2, TXT, Markdown, and HTML are supported"
                 )
         metadata = BookMetadata(
             title=(title or "").strip() or metadata.title,

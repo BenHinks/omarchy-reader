@@ -8,14 +8,15 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from opds import (
-    AZW3_MIME, EPUB_MIME, FB2_MIME, FBZ_MIME, MOBI_MIME,
+    AZW3_MIME, EPUB_MIME, FB2_MIME, FBZ_MIME, HTML_MIME, MARKDOWN_MIME,
+    MOBI_MIME, OPDS_2_MIME, TXT_MIME,
     OpdsEntry, OpdsError, OpdsFeed, _request,
     download_book, fetch_complete_feed, parse_feed,
 )
 
 
 FEED = b'''<?xml version="1.0"?>
-<feed xmlns="http://www.w3.org/2005/Atom">
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:opds="http://opds-spec.org/2010/catalog">
   <title>Test Catalog</title>
   <link rel="next" href="?page=2"/>
   <entry><title>Browse Authors</title>
@@ -23,27 +24,100 @@ FEED = b'''<?xml version="1.0"?>
   </entry>
   <entry><title>A Book</title><author><name>An Author</name></author>
     <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="files/book.epub"/>
-    <link rel="http://opds-spec.org/acquisition" type="application/x-mobipocket-ebook" length="7654321" href="files/book.mobi"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/x-mobipocket-ebook" length="7654321" href="files/book.mobi"/>
   </entry>
   <entry><title>A PDF</title><author><name>Another Author</name></author>
-    <link rel="http://opds-spec.org/acquisition" type="application/pdf" length="12345678" href="files/book.pdf"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/pdf" length="12345678" href="files/book.pdf"/>
   </entry>
   <entry><title>A Comic</title>
-    <link rel="http://opds-spec.org/acquisition" type="application/vnd.comicbook+zip" length="5000000" href="files/comic.cbz"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/vnd.comicbook+zip" length="5000000" href="files/comic.cbz"/>
   </entry>
   <entry><title>A MOBI</title>
-    <link rel="http://opds-spec.org/acquisition" type="application/x-mobipocket-ebook" href="files/book.mobi"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/x-mobipocket-ebook" href="files/book.mobi"/>
   </entry>
   <entry><title>An AZW3</title>
-    <link rel="http://opds-spec.org/acquisition" type="application/vnd.amazon.mobi8-ebook" href="files/book.azw3"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/vnd.amazon.mobi8-ebook" href="files/book.azw3"/>
   </entry>
   <entry><title>An FB2</title>
-    <link rel="http://opds-spec.org/acquisition" type="application/x-fictionbook+xml" href="files/book.fb2"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/x-fictionbook+xml" href="files/book.fb2"/>
   </entry>
   <entry><title>A Compressed FB2</title>
-    <link rel="http://opds-spec.org/acquisition" type="application/x-zip-compressed-fb2" href="files/book.fb2.zip"/>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="application/x-zip-compressed-fb2" href="files/book.fb2.zip"/>
+  </entry>
+  <entry><title>Plain Notes</title>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="text/plain" href="files/notes.txt"/>
+  </entry>
+  <entry><title>Markdown Notes</title>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="text/markdown" href="files/notes.md"/>
+  </entry>
+  <entry><title>HTML Notes</title>
+    <link rel="http://opds-spec.org/acquisition/open-access" type="text/html" href="files/notes.html"/>
+  </entry>
+  <entry><title>Paid Book</title>
+    <link rel="http://opds-spec.org/acquisition/buy" type="application/epub+zip" href="files/paid.epub"/>
+  </entry>
+  <entry><title>Unspecified Acquisition</title>
+    <link rel="http://opds-spec.org/acquisition" type="application/epub+zip" href="files/unspecified.epub">
+      <opds:price currencycode="USD">1.99</opds:price>
+    </link>
   </entry>
 </feed>'''
+
+OPDS_2_FEED = b'''{
+  "metadata": {"title": "JSON Catalog"},
+  "links": [
+    {"rel": "self", "href": "/opds", "type": "application/opds+json"},
+    {"rel": ["next"], "href": "?page=2", "type": "application/opds+json"}
+  ],
+  "navigation": [
+    {"title": "New Books", "href": "new", "type": "application/opds+json"},
+    {"title": "Website", "href": "about", "type": "text/html"}
+  ],
+  "publications": [
+    {
+      "metadata": {
+        "title": "Free Book",
+        "author": [{"name": "First Author"}, "Second Author"]
+      },
+      "links": [
+        {"rel": "download", "href": "files/free.epub", "type": "application/epub+zip", "length": 1234},
+        {"rel": "http://opds-spec.org/acquisition/open-access", "href": "files/free.pdf", "type": "application/pdf"},
+        {"rel": "acquisition", "href": "files/free.md", "type": "text/markdown"},
+        {"rel": "buy", "href": "files/paid.epub", "type": "application/epub+zip"},
+        {
+          "rel": "acquisition", "href": "files/unspecified.epub", "type": "application/epub+zip",
+          "properties": {"price": {"currency": "USD", "value": 1.99}}
+        }
+      ]
+    },
+    {
+      "metadata": {"title": "Encrypted Book", "author": "Locked Author"},
+      "links": [{
+        "rel": "download", "href": "files/locked.epub", "type": "application/epub+zip",
+        "properties": {"encrypted": {"scheme": "http://readium.org/2014/01/lcp"}}
+      }]
+    },
+    {
+      "metadata": {"title": "Indirect Book"},
+      "links": [{
+        "rel": "download", "href": "get-book", "type": "text/html",
+        "properties": {"indirectAcquisition": [{"type": "application/epub+zip"}]}
+      }]
+    }
+  ],
+  "groups": [{
+    "metadata": {"title": "Featured"},
+    "navigation": [{"title": "Classics", "href": "/classics", "type": "application/opds+json"}],
+    "publications": [{
+      "metadata": {"title": {"en": "Grouped Book"}, "author": {"name": "Group Author"}},
+      "links": [{"rel": "download", "href": "/grouped.txt", "type": "text/plain"}]
+    }]
+  }],
+  "facets": [{
+    "metadata": {"title": "Language"},
+    "links": [{"title": "English", "href": "/en", "type": "application/opds+json"}]
+  }]
+}'''
 
 
 class OpdsTests(unittest.TestCase):
@@ -67,9 +141,49 @@ class OpdsTests(unittest.TestCase):
         self.assertEqual(feed.entries[3].size, 5000000)
         self.assertEqual(
             [entry.media_type for entry in feed.entries[4:]],
-            [MOBI_MIME, AZW3_MIME, FB2_MIME, FBZ_MIME],
+            [MOBI_MIME, AZW3_MIME, FB2_MIME, FBZ_MIME, TXT_MIME, MARKDOWN_MIME, HTML_MIME],
         )
+        self.assertNotIn("Paid Book", [entry.title for entry in feed.entries])
+        self.assertNotIn("Unspecified Acquisition", [entry.title for entry in feed.entries])
         self.assertEqual(feed.next_url, "https://books.example/opds/?page=2")
+
+    def test_parses_opds_2_navigation_groups_facets_and_free_publications(self):
+        feed = parse_feed(OPDS_2_FEED, "https://books.example/catalog/")
+        self.assertEqual(feed.title, "JSON Catalog")
+        self.assertEqual(feed.next_url, "https://books.example/catalog/?page=2")
+        self.assertEqual(
+            [(entry.title, entry.kind) for entry in feed.entries],
+            [
+                ("New Books", "navigation"),
+                ("Free Book", "book"),
+                ("Classics", "navigation"),
+                ("Grouped Book", "book"),
+                ("English", "navigation"),
+            ],
+        )
+        book = feed.entries[1]
+        self.assertEqual(book.author, "First Author, Second Author")
+        self.assertEqual(
+            [item.media_type for item in book.available_acquisitions],
+            [EPUB_MIME, "application/pdf", MARKDOWN_MIME],
+        )
+        self.assertEqual(book.available_acquisitions[0].size, 1234)
+        self.assertEqual(feed.entries[3].href, "https://books.example/grouped.txt")
+
+    def test_rejects_paid_generic_encrypted_and_indirect_opds_2_links(self):
+        feed = parse_feed(OPDS_2_FEED, "https://books.example/catalog/")
+        books = [entry for entry in feed.entries if entry.kind == "book"]
+        self.assertEqual([entry.title for entry in books], ["Free Book", "Grouped Book"])
+        hrefs = [item.href for entry in books for item in entry.available_acquisitions]
+        self.assertNotIn("https://books.example/catalog/files/paid.epub", hrefs)
+        self.assertNotIn("https://books.example/catalog/files/unspecified.epub", hrefs)
+        self.assertNotIn("https://books.example/catalog/files/locked.epub", hrefs)
+
+    def test_rejects_invalid_or_non_feed_opds_2_json(self):
+        with self.assertRaises(OpdsError):
+            parse_feed(b"{not json}", "https://books.example/opds")
+        with self.assertRaises(OpdsError):
+            parse_feed(b'{"metadata":{"title":"Publication"}}', "https://books.example/opds")
 
     def test_follows_paginated_feed_for_complete_searchable_listing(self):
         first = OpdsFeed(
@@ -111,6 +225,14 @@ class OpdsTests(unittest.TestCase):
         self.assertEqual(request.full_url, "http://books.lan/opds")
         with self.assertRaises(OpdsError):
             _request("ftp://books.lan/opds", "", "", "application/atom+xml")
+
+    def test_catalog_request_accepts_opds_2_and_opds_1(self):
+        request = _request(
+            "https://books.example/opds", "", "",
+            f"{OPDS_2_MIME}, application/atom+xml;profile=opds-catalog;q=0.9",
+        )
+        self.assertIn(OPDS_2_MIME, request.headers["Accept"])
+        self.assertIn("application/atom+xml", request.headers["Accept"])
 
 
 if __name__ == "__main__":

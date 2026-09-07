@@ -4,9 +4,12 @@ Omarchy Reader is an offline-first ebook and comic reader for Linux. It follows
 the active Omarchy theme, keeps imported books in a visible local library, and
 remembers reading progress.
 
-Supported formats are EPUB, PDF, CBZ/ZIP comics, MOBI/AZW3, and FB2/FBZ.
-Generic OPDS 1.x catalogs can provide any supported format; when a publication
-offers several formats, each one is shown as a separate download choice.
+Supported formats are EPUB, PDF, CBZ/ZIP comics, MOBI/AZW3, FB2/FBZ, plain
+text, Markdown, and standalone HTML.
+OPDS 1.x catalogs and experimental OPDS 2 catalogs can provide any supported
+format; when a free, DRM-free publication offers several formats, each is shown
+as a separate download choice. Purchase, lending, subscription, preview,
+encrypted, and indirect acquisition links are intentionally excluded.
 
 ## Requirements
 
@@ -42,19 +45,34 @@ To add **Omarchy Reader** to the desktop Apps list:
 ```
 
 The launcher runs this checkout, so rerun the installer if the project directory
-moves. No system files or root privileges are required.
+moves. Rerun it after upgrading to register any newly supported file types. No
+system files or root privileges are required.
 
 ## User guide
 
 Select **Add Book** and choose one of these sources:
 
-- **From This Device** copies a supported local file into the managed library.
+- **From File** copies a supported file into the managed library.
 - **From OPDS** lets you save a catalog URL and optional Basic-auth credentials,
-  browse or search its listing, and download a chosen format.
+  browse or filter its listing, and download a chosen free, DRM-free format.
+
+Project Gutenberg and Unglue.it are included as built-in OPDS catalogs. Catalogs
+you add are listed above the built-ins. If you add a built-in URL yourself, your
+saved name and credentials take its place in the list. OPDS 2 support is
+experimental; compatible catalogs may vary in how they represent navigation and
+downloads.
 
 Select a library row to resume reading. Use the on-screen previous/next controls,
 the progress slider, or the Left/Right and Page Up/Page Down keys. Space advances
-a page. EPUB-family books also show chapter marks on the progress control.
+a page. EPUB-family books also show chapter marks on the progress control. TXT,
+Markdown, and HTML documents use a themed scrolling view with page-sized jumps.
+
+Text documents recognize UTF-8, byte-order-marked UTF-16/UTF-32, UTF-16 without
+a byte-order mark when its byte pattern is clear, Windows-1252, and Latin-1.
+HTML charset declarations are honored. Imported HTML is sanitized: scripts,
+forms, frames, active attributes, and remote images are removed before display.
+Markdown supports common headings, paragraphs, emphasis, links, lists, quotes,
+horizontal rules, inline code, and fenced code blocks; raw HTML is shown as text.
 
 The trash button beside a book removes Omarchy Reader's managed copy and its
 saved progress. It does not remove the original file from which the book was
@@ -89,6 +107,8 @@ The first-party code is split by responsibility:
 - `src/library.py` validates formats, imports and deduplicates files, and owns the
   SQLite data model.
 - `src/opds.py` parses OPDS feeds and performs bounded network transfers.
+- `src/document.py` decodes text encodings and safely renders TXT, Markdown, and
+  standalone HTML.
 - `src/theme.py` loads the current Omarchy palette and generates GTK CSS.
 - `src/web/` contains the WebKit reader bridge and UI; `src/web/foliate-js/` is a
   pinned third-party submodule.
@@ -97,6 +117,14 @@ Run the unit tests from the repository root:
 
 ```bash
 python3 -m unittest discover -s tests
+node --test tests/document-reader.test.mjs
+```
+
+Generate a local library of long TXT, Markdown, and HTML fixtures in several
+encodings for manual reader testing:
+
+```bash
+python3 tools/generate-test-library.py
 ```
 
 ## License

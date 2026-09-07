@@ -13,3 +13,6 @@ dist/
 *.sqlite3-wal
 *.key
 *.pem
+
+# Reproducible manual fixtures created by tools/generate-test-library.py.
+test-library/

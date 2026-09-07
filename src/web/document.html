@@ -1,0 +1,27 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src data:; object-src 'none'; form-action 'none'; base-uri 'none'">
+  <link rel="stylesheet" href="document.css">
+  <!-- THEME_STYLE -->
+  <title><!-- DOCUMENT_TITLE --></title>
+</head>
+<body data-progress="0">
+  <main id="viewport" tabindex="0">
+    <article id="content"><!-- DOCUMENT_BODY --></article>
+  </main>
+  <nav id="navigation" aria-label="Document navigation">
+    <button id="previous" aria-label="Previous page">‹</button>
+    <div id="progress">
+      <div id="progress-track"><div id="progress-fill"></div></div>
+      <input id="progress-slider" type="range" min="0" max="1" step="0.001" value="0"
+             aria-label="Reading progress" aria-valuetext="0%">
+      <span id="progress-label" aria-live="polite">0%</span>
+    </div>
+    <button id="next" aria-label="Next page">›</button>
+  </nav>
+  <script src="document.js"></script>
+</body>
+</html>
