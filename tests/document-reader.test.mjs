@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 
@@ -17,13 +18,24 @@ const makeElement = () => ({
 })
 
 
+test('EPUB reader initially focuses its reading surface', () => {
+  const html = readFileSync(new URL('../src/web/reader.html', import.meta.url), 'utf8')
+  const script = readFileSync(new URL('../src/web/reader.js', import.meta.url), 'utf8')
+  assert.match(html, /<main id="book" tabindex="0"/)
+  assert.match(script, /bookHost\.focus\(/)
+  assert.doesNotMatch(script, /querySelector\('#previous'\)\.focus\(/)
+})
+
+
 test('restores progress and saves slider seeks', async () => {
   const windowListeners = {}
+  const documentListeners = {}
+  const pageMoves = []
   const viewport = Object.assign(makeElement(), {
     clientHeight: 100,
     scrollHeight: 1000,
     scrollTop: 0,
-    scrollBy() {},
+    scrollBy(options) { pageMoves.push(options.top) },
   })
   const elements = {
     '#viewport': viewport,
@@ -38,7 +50,7 @@ test('restores progress and saves slider seeks', async () => {
 
   globalThis.document = {
     body: { dataset: { progress: '0.42' } },
-    addEventListener() {},
+    addEventListener(name, callback) { documentListeners[name] = callback },
     querySelector(selector) { return elements[selector] },
   }
   globalThis.window = {
@@ -66,4 +78,26 @@ test('restores progress and saves slider seeks', async () => {
     messages.filter(message => message.type === 'progress').at(-1)?.fraction,
     0.65,
   )
+
+  const keydown = documentListeners.keydown
+  const keyEvent = (key, overrides = {}) => ({
+    key,
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    shiftKey: false,
+    target: { matches: () => false },
+    preventDefault() {},
+    ...overrides,
+  })
+  keydown(keyEvent(' ', { shiftKey: true }))
+  keydown(keyEvent('ArrowRight'))
+  assert.deepEqual(pageMoves, [-90, 90])
+
+  keydown(keyEvent('Escape'))
+  keydown(keyEvent('g', { ctrlKey: true }))
+  assert.deepEqual(messages.slice(-2), [{ type: 'back' }, { type: 'show-help' }])
+
+  keydown(keyEvent('ArrowRight', { target: { matches: () => true } }))
+  assert.deepEqual(pageMoves, [-90, 90])
 })

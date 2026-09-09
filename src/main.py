@@ -139,6 +139,9 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.current_catalog: Catalog | None = None
         self.catalog_history: list[str] = []
         self.theme = Theme.load()
+        self.theme_provider: Gtk.CssProvider | None = None
+        self.theme_reload_source: int | None = None
+        self.theme_monitors: list[Gio.FileMonitor] = []
         self.reader_scheme = ReaderScheme(PROJECT_DIR / "src/web", library.books_dir)
         self.reader_scheme.register(WebKit.WebContext.get_default())
         self._apply_theme()
@@ -155,7 +158,9 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.add_button.connect("clicked", self._show_add_book_dialog)
         self.header.pack_end(self.add_button)
 
-        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.stack = Gtk.Stack(
+            transition_type=Gtk.StackTransitionType.CROSSFADE, vexpand=True,
+        )
         self.empty_page = self._build_empty_page()
         self.books_page, self.books_list = self._build_books_page()
         self.epub_reader_page = self._build_epub_reader_page()
@@ -167,18 +172,82 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.stack.add_named(self.pdf_reader_page, "pdf-reader")
         self.stack.add_named(self.comic_reader_page, "comic-reader")
 
+        self.guide_button = Gtk.Button(label="Guide (F1 or Ctrl-G)")
+        self.guide_button.add_css_class("flat")
+        self.guide_button.add_css_class("guide-link")
+        self.guide_button.set_tooltip_text("Open the keyboard shortcuts and user guide")
+        self.guide_button.connect("clicked", self._show_keyboard_help)
+        self.guide_bar = Gtk.CenterBox()
+        self.guide_bar.add_css_class("guide-bar")
+        self.guide_bar.set_center_widget(self.guide_button)
+
+        window_content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        window_content.append(self.stack)
+        window_content.append(self.guide_bar)
+
         toolbar_view = Adw.ToolbarView()
         toolbar_view.add_top_bar(self.header)
-        toolbar_view.set_content(self.stack)
+        toolbar_view.set_content(window_content)
+        keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        keys.connect("key-pressed", self._window_key_pressed)
+        toolbar_view.add_controller(keys)
         self.set_content(toolbar_view)
+        self._watch_active_theme()
         self._refresh_library()
+        GLib.idle_add(self._focus_library_book, None)
 
     def _apply_theme(self) -> None:
-        provider = Gtk.CssProvider()
-        provider.load_from_string(self.theme.gtk_css())
-        Gtk.StyleContext.add_provider_for_display(
-            self.get_display(), provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        if self.theme_provider is None:
+            self.theme_provider = Gtk.CssProvider()
+            Gtk.StyleContext.add_provider_for_display(
+                self.get_display(), self.theme_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+        self.theme_provider.load_from_string(self.theme.gtk_css())
+        style_manager = Adw.StyleManager.get_default()
+        style_manager.set_color_scheme(
+            Adw.ColorScheme.FORCE_LIGHT if self.theme.mode == "light"
+            else Adw.ColorScheme.FORCE_DARK
         )
+
+    def _watch_active_theme(self) -> None:
+        """Reload application styling when Omarchy materializes a new theme."""
+        paths = (Theme.active_theme_dir(), Theme.active_theme_dir().parent)
+        for path in paths:
+            try:
+                monitor = Gio.File.new_for_path(str(path)).monitor_directory(
+                    Gio.FileMonitorFlags.WATCH_MOVES, None
+                )
+            except GLib.Error:
+                continue
+            monitor.connect("changed", self._active_theme_changed)
+            self.theme_monitors.append(monitor)
+
+    def _active_theme_changed(self, *_args) -> None:
+        if self.theme_reload_source is not None:
+            GLib.source_remove(self.theme_reload_source)
+        self.theme_reload_source = GLib.timeout_add(250, self._reload_active_theme)
+
+    def _reload_active_theme(self) -> bool:
+        self.theme_reload_source = None
+        theme = Theme.load()
+        if theme == self.theme:
+            return GLib.SOURCE_REMOVE
+        self.theme = theme
+        self._apply_theme()
+        self.web_view.set_background_color(self._rgba(self.theme.background))
+        self.pdf_canvas.queue_draw()
+
+        if self.current_book and self.stack.get_visible_child_name() == "epub-reader":
+            current = next(
+                (book for book in self.library.list_books() if book.id == self.current_book.id),
+                self.current_book,
+            )
+            self.current_book = current
+            if f".{current.format}" in DOCUMENT_EXTENSIONS:
+                self._open_document(current)
+            else:
+                self._open_epub(current)
+        return GLib.SOURCE_REMOVE
 
     def _build_empty_page(self) -> Gtk.Widget:
         page = Adw.StatusPage(
@@ -307,6 +376,271 @@ class ReaderWindow(Adw.ApplicationWindow):
         color.parse(value)
         return color
 
+    @staticmethod
+    def _has_modifier(state, modifier) -> bool:
+        return bool(state & modifier)
+
+    @staticmethod
+    def _ancestor_of_type(widget: Gtk.Widget | None, widget_type):
+        while widget is not None:
+            if isinstance(widget, widget_type):
+                return widget
+            widget = widget.get_parent()
+        return None
+
+    @staticmethod
+    def _descendant_buttons(widget: Gtk.Widget) -> list[Gtk.Button]:
+        buttons = []
+        child = widget.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Button) and child.get_visible() and child.get_sensitive():
+                buttons.append(child)
+            buttons.extend(ReaderWindow._descendant_buttons(child))
+            child = child.get_next_sibling()
+        return buttons
+
+    def _row_focus_target(self, row: Gtk.ListBoxRow, option: int = 0) -> Gtk.Widget:
+        if getattr(row, "opds_is_book", False):
+            buttons = self._descendant_buttons(row)
+            if buttons:
+                return buttons[min(option, len(buttons) - 1)]
+        return row
+
+    @staticmethod
+    def _visible_rows(list_box: Gtk.ListBox) -> list[Gtk.ListBoxRow]:
+        rows = []
+        child = list_box.get_first_child()
+        while child is not None:
+            if (
+                isinstance(child, Gtk.ListBoxRow)
+                and child.get_visible()
+                and child.get_child_visible()
+                and child.get_sensitive()
+            ):
+                rows.append(child)
+            child = child.get_next_sibling()
+        return rows
+
+    def _focus_first_row(self, list_box: Gtk.ListBox) -> bool:
+        rows = self._visible_rows(list_box)
+        if rows:
+            self._row_focus_target(rows[0]).grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    def _focus_library_book(self, book_id: int | None) -> bool:
+        rows = self._visible_rows(self.books_list)
+        target = next(
+            (row for row in rows if getattr(getattr(row, "book", None), "id", None) == book_id),
+            rows[0] if rows else None,
+        )
+        if target is not None:
+            self._row_focus_target(target).grab_focus()
+        elif self.stack.get_visible_child_name() == "empty":
+            self.add_button.grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    @staticmethod
+    def _focus_widget(widget: Gtk.Widget) -> bool:
+        widget.grab_focus()
+        return GLib.SOURCE_REMOVE
+
+    def _move_list_focus(self, direction: int) -> bool:
+        focus = self.get_focus()
+        row = self._ancestor_of_type(focus, Gtk.ListBoxRow)
+        list_box = self._ancestor_of_type(focus, Gtk.ListBox)
+        if row is None or list_box is None:
+            return False
+        rows = self._visible_rows(list_box)
+        if row not in rows:
+            return False
+        option = 0
+        if getattr(row, "opds_is_book", False) and isinstance(focus, Gtk.Button):
+            buttons = self._descendant_buttons(row)
+            if focus in buttons:
+                option = buttons.index(focus)
+        target_index = min(len(rows) - 1, max(0, rows.index(row) + direction))
+        self._row_focus_target(rows[target_index], option).grab_focus()
+        return True
+
+    def _move_library_focus(self, direction: int) -> bool:
+        """Move through Add Book, library rows, and the bottom Guide link."""
+        focus = self.get_focus()
+        rows = self._visible_rows(self.books_list)
+        if focus is self.add_button:
+            if direction > 0:
+                target = self._row_focus_target(rows[0]) if rows else self.guide_button
+                target.grab_focus()
+            return True
+        if focus is self.guide_button:
+            if direction < 0:
+                target = self._row_focus_target(rows[-1]) if rows else self.add_button
+                target.grab_focus()
+            return True
+
+        row = self._ancestor_of_type(focus, Gtk.ListBoxRow)
+        list_box = self._ancestor_of_type(focus, Gtk.ListBox)
+        if row is None or list_box is not self.books_list or row not in rows:
+            return False
+        index = rows.index(row) + direction
+        if index < 0:
+            self.add_button.grab_focus()
+        elif index >= len(rows):
+            self.guide_button.grab_focus()
+        else:
+            self._row_focus_target(rows[index]).grab_focus()
+        return True
+
+    def _move_library_action_focus(self, direction: int) -> bool:
+        """Move toward Open with Right, opening it at the end of the sequence."""
+        focus = self.get_focus()
+        row = self._ancestor_of_type(focus, Gtk.ListBoxRow)
+        if row is None or not hasattr(row, "book"):
+            return False
+        actions: list[Gtk.Widget] = [*self._descendant_buttons(row), row]
+        if focus not in actions:
+            row.grab_focus()
+            return True
+        if direction > 0 and focus is row:
+            self._open_book(row.book)
+            return True
+        current = actions.index(focus)
+        target = min(len(actions) - 1, max(0, current + direction))
+        actions[target].grab_focus()
+        return True
+
+    def _move_format_focus(self, direction: int) -> bool:
+        focus = self.get_focus()
+        if not isinstance(focus, Gtk.Button):
+            return False
+        row = self._ancestor_of_type(focus, Gtk.ListBoxRow)
+        if row is None or not getattr(row, "opds_is_book", False):
+            return False
+        buttons = self._descendant_buttons(row)
+        if focus not in buttons:
+            return False
+        target = min(len(buttons) - 1, max(0, buttons.index(focus) + direction))
+        buttons[target].grab_focus()
+        return True
+
+    def _handle_opds_horizontal(self, direction: int) -> bool:
+        """Move within an OPDS row, opening a focused hierarchy arrow with Right."""
+        focus = self.get_focus()
+        row = self._ancestor_of_type(focus, Gtk.ListBoxRow)
+        list_box = self._ancestor_of_type(focus, Gtk.ListBox)
+        if row is None or list_box is not self.opds_list:
+            return False
+        if getattr(row, "opds_is_book", False):
+            self._move_format_focus(direction)
+            return True
+        if not getattr(row, "opds_opens_next", False):
+            return True
+
+        actions: list[Gtk.Widget] = [*self._descendant_buttons(row), row]
+        if focus not in actions:
+            row.grab_focus()
+            return True
+        if direction > 0 and focus is row:
+            row.activate()
+            return True
+        current = actions.index(focus)
+        target = min(len(actions) - 1, max(0, current + direction))
+        actions[target].grab_focus()
+        return True
+
+    def _window_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
+        control = self._has_modifier(state, Gdk.ModifierType.CONTROL_MASK)
+        if keyval == Gdk.KEY_F1 or (control and keyval in (Gdk.KEY_g, Gdk.KEY_G)):
+            self._show_keyboard_help()
+            return True
+        if keyval == Gdk.KEY_Escape and self.stack.get_visible_child_name() in (
+            "epub-reader", "pdf-reader", "comic-reader",
+        ):
+            self._show_library()
+            return True
+
+        if state & (
+            Gdk.ModifierType.CONTROL_MASK
+            | Gdk.ModifierType.ALT_MASK
+            | Gdk.ModifierType.SUPER_MASK
+        ):
+            return False
+        if self.stack.get_visible_child_name() not in ("empty", "books"):
+            return False
+        if keyval == Gdk.KEY_Up:
+            return self._move_library_focus(-1)
+        if keyval == Gdk.KEY_Down:
+            return self._move_library_focus(1)
+        if keyval == Gdk.KEY_Left:
+            return self._move_library_action_focus(-1)
+        if keyval == Gdk.KEY_Right:
+            return self._move_library_action_focus(1)
+        return False
+
+    def _show_keyboard_help(self, *_args) -> None:
+        """Show the fixed keyboard map and a concise keyboard-first guide."""
+        dialog = Adw.Dialog(title="Keyboard & Help", content_width=620, content_height=620)
+        content = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=18,
+            margin_top=24, margin_bottom=24, margin_start=24, margin_end=24,
+        )
+        intro = Gtk.Label(
+            label=(
+                "Omarchy Reader can be operated without a pointer. Focus is shown with "
+                "the active Omarchy theme, and Escape always moves back one level."
+            ),
+            wrap=True, xalign=0,
+        )
+        intro.add_css_class("dim-label")
+        content.append(intro)
+        library_link = Gtk.LinkButton(
+            uri=self.library.books_dir.resolve().as_uri(),
+            label="Open Library in Files",
+            halign=Gtk.Align.START,
+        )
+        library_link.add_css_class("flat")
+        library_link.add_css_class("guide-library-link")
+        content.append(library_link)
+
+        sections = (
+            ("Everywhere", (
+                ("Open this guide", "F1  /  Ctrl+G"),
+                ("Move back or close", "Escape"),
+                ("Move between controls", "Tab  /  Shift+Tab"),
+                ("Activate the focused item", "Enter"),
+            )),
+            ("Library and catalogs", (
+                ("Move through Add Book, books, Guide, or feeds", "Up  /  Down"),
+                ("Move back through a book's actions", "Left"),
+                ("Move toward >; open it when already focused", "Right"),
+                ("Switch From File and From OPDS", "Left  /  Right"),
+                ("Move between download formats", "Left  /  Right"),
+                ("Type to filter an open catalog", "Type in listing"),
+            )),
+            ("While reading", (
+                ("Previous page", "Left  /  Page Up  /  Shift+Space"),
+                ("Next page", "Right  /  Page Down  /  Space"),
+                ("Adjust a focused progress control", "Left  /  Right"),
+            )),
+        )
+        for title, shortcuts in sections:
+            group = Adw.PreferencesGroup(title=title)
+            for description, shortcut in shortcuts:
+                row = Adw.ActionRow(title=description, activatable=False)
+                key = Gtk.Label(label=shortcut, valign=Gtk.Align.CENTER)
+                key.add_css_class("shortcut-key")
+                row.add_suffix(key)
+                group.add(row)
+            content.append(group)
+
+        clamp = Adw.Clamp(maximum_size=720, child=content)
+        scroll = Gtk.ScrolledWindow(child=clamp, vexpand=True)
+        header = Adw.HeaderBar(title_widget=Adw.WindowTitle(title="Keyboard & Help"))
+        toolbar = Adw.ToolbarView()
+        toolbar.add_top_bar(header)
+        toolbar.set_content(scroll)
+        dialog.set_child(toolbar)
+        dialog.present(self)
+
     def _refresh_library(self) -> None:
         """Rebuild the library rows from persistent state."""
         while child := self.books_list.get_first_child():
@@ -322,10 +656,13 @@ class ReaderWindow(Adw.ApplicationWindow):
             row.add_suffix(progress)
             remove = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
             remove.add_css_class("flat")
+            remove.add_css_class("library-delete")
             remove.set_tooltip_text(f"Remove {book.title} from the library")
             remove.connect("clicked", self._confirm_remove_book, book)
             row.add_suffix(remove)
-            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+            open_indicator = Gtk.Image(icon_name="go-next-symbolic")
+            open_indicator.add_css_class("library-open-icon")
+            row.add_suffix(open_indicator)
             self.books_list.append(row)
         self.stack.set_visible_child_name("books" if books else "empty")
         self.header.set_title_widget(Adw.WindowTitle(title="Library", subtitle=f"{len(books)} books"))
@@ -349,6 +686,7 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.add_pages.connect("notify::visible-child-name", self._add_page_changed)
 
         switcher = Adw.ViewSwitcher(stack=self.add_pages, policy=Adw.ViewSwitcherPolicy.WIDE)
+        switcher.add_css_class("source-switcher")
         self.opds_back_button = Gtk.Button(icon_name="go-previous-symbolic", visible=False)
         self.opds_back_button.set_tooltip_text("Back to catalogs")
         self.opds_back_button.connect("clicked", self._opds_go_back)
@@ -364,12 +702,64 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.add_dialog.set_child(toolbar)
         self._show_catalogs()
         self.add_dialog.present(self)
+        GLib.idle_add(self._focus_widget, self.local_choose_button)
 
-    def _add_dialog_key_pressed(self, _controller, keyval, _keycode, _state) -> bool:
+    def _add_dialog_key_pressed(self, _controller, keyval, _keycode, state) -> bool:
+        control = self._has_modifier(state, Gdk.ModifierType.CONTROL_MASK)
+        if keyval == Gdk.KEY_F1 or (control and keyval in (Gdk.KEY_g, Gdk.KEY_G)):
+            self._show_keyboard_help()
+            return True
         if keyval == Gdk.KEY_Escape:
+            if (
+                self.add_pages.get_visible_child_name() == "opds"
+                and self.current_catalog is not None
+            ):
+                self._opds_go_back()
+                return True
             self.add_dialog.close()
             return True
+        if state & (
+            Gdk.ModifierType.CONTROL_MASK
+            | Gdk.ModifierType.ALT_MASK
+            | Gdk.ModifierType.SUPER_MASK
+        ):
+            return False
+        if (
+            keyval == Gdk.KEY_Down
+            and self._ancestor_of_type(self.get_focus(), Gtk.SearchEntry) is not None
+        ):
+            rows = self._visible_rows(self.opds_list)
+            if rows:
+                self._row_focus_target(rows[0]).grab_focus()
+                return True
+        if self._ancestor_of_type(self.get_focus(), Gtk.Editable) is not None:
+            return False
+        if keyval == Gdk.KEY_Up:
+            return self._move_list_focus(-1)
+        if keyval == Gdk.KEY_Down:
+            return self._move_list_focus(1)
+        if keyval == Gdk.KEY_Left:
+            if self._handle_opds_horizontal(-1):
+                return True
+            if self.add_pages.get_visible_child_name() == "local":
+                return self._switch_add_source(-1)
+            return False
+        if keyval == Gdk.KEY_Right:
+            if self._handle_opds_horizontal(1):
+                return True
+            if self.add_pages.get_visible_child_name() == "local":
+                return self._switch_add_source(1)
+            return False
         return False
+
+    def _switch_add_source(self, direction: int) -> bool:
+        """Switch From File/From OPDS while still at the source-selection level."""
+        pages = ("local", "opds")
+        current = self.add_pages.get_visible_child_name()
+        index = pages.index(current) if current in pages else 0
+        target = min(len(pages) - 1, max(0, index + direction))
+        self.add_pages.set_visible_child_name(pages[target])
+        return True
 
     def _build_local_add_page(self) -> Gtk.Widget:
         page = Adw.StatusPage(
@@ -377,10 +767,10 @@ class ReaderWindow(Adw.ApplicationWindow):
             title="Choose a book",
             description="Select a supported ebook, PDF, comic, or text document.",
         )
-        choose_button = Gtk.Button(label="Choose Book", halign=Gtk.Align.CENTER)
-        choose_button.add_css_class("suggested-action")
-        choose_button.connect("clicked", self._choose_local_book)
-        page.set_child(choose_button)
+        self.local_choose_button = Gtk.Button(label="Choose Book", halign=Gtk.Align.CENTER)
+        self.local_choose_button.add_css_class("suggested-action")
+        self.local_choose_button.connect("clicked", self._choose_local_book)
+        page.set_child(self.local_choose_button)
         return page
 
     def _build_opds_add_page(self) -> Gtk.Widget:
@@ -562,6 +952,10 @@ class ReaderWindow(Adw.ApplicationWindow):
 
     def _add_page_changed(self, *_args) -> None:
         self._update_opds_back_button()
+        if self.add_pages.get_visible_child_name() == "opds":
+            GLib.idle_add(self._focus_first_row, self.opds_list)
+        else:
+            GLib.idle_add(self._focus_widget, self.local_choose_button)
 
     def _update_opds_back_button(self) -> None:
         on_opds = self.add_pages.get_visible_child_name() == "opds"
@@ -580,11 +974,14 @@ class ReaderWindow(Adw.ApplicationWindow):
         for catalog in self.library.list_catalogs():
             row = Adw.ActionRow(title=catalog.name, subtitle=catalog.url, activatable=True)
             row.opds_search_text = f"{catalog.name} {catalog.url}".casefold()
+            row.opds_opens_next = True
             if catalog.is_builtin:
                 built_in = Gtk.Label(label="Built-in")
                 built_in.add_css_class("dim-label")
                 row.add_suffix(built_in)
-            row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+            open_indicator = Gtk.Image(icon_name="go-next-symbolic")
+            open_indicator.add_css_class("opds-open-icon")
+            row.add_suffix(open_indicator)
             row.connect("activated", lambda _row, item=catalog: self._open_catalog(item))
             self.opds_list.append(row)
         add = Adw.ActionRow(title="Add OPDS catalog", activatable=True)
@@ -594,6 +991,8 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.opds_list.append(add)
         self.opds_title.set_label("OPDS catalogs")
         self._update_opds_back_button()
+        if self.add_pages.get_visible_child_name() == "opds":
+            GLib.idle_add(self._focus_first_row, self.opds_list)
 
     def _add_catalog_dialog(self, *_args) -> None:
         group = Adw.PreferencesGroup()
@@ -722,7 +1121,10 @@ class ReaderWindow(Adw.ApplicationWindow):
         for entry in feed.entries:
             if entry.kind == "navigation":
                 row = Adw.ActionRow(title=entry.title, subtitle=entry.author, activatable=True)
-                row.add_suffix(Gtk.Image(icon_name="go-next-symbolic"))
+                row.opds_opens_next = True
+                open_indicator = Gtk.Image(icon_name="go-next-symbolic")
+                open_indicator.add_css_class("opds-open-icon")
+                row.add_suffix(open_indicator)
                 row.connect("activated", lambda _row, item=entry: self._load_feed(item.href, True))
                 details = ""
             else:
@@ -742,6 +1144,7 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.opds_book_count = sum(entry.kind == "book" for entry in feed.entries)
         self._update_opds_context()
         self._update_opds_back_button()
+        GLib.idle_add(self._focus_first_row, self.opds_list)
 
     def _build_opds_book_row(self, entry: OpdsEntry, subtitle: str) -> Gtk.ListBoxRow:
         title = Gtk.Label(label=entry.title, xalign=0, wrap=True)
@@ -928,6 +1331,7 @@ class ReaderWindow(Adw.ApplicationWindow):
 
         font_family = self.theme.font_family.replace("\\", "\\\\").replace('"', '\\"')
         theme_style = "<style>:root {" + ";".join((
+            f"color-scheme:{self.theme.mode}",
             f"--background:{self.theme.background}",
             f"--surface:{self.theme.surface}",
             f"--foreground:{self.theme.foreground}",
@@ -935,6 +1339,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             f"--accent:{self.theme.accent}",
             f"--selection:{self.theme.selection}",
             f'--reader-font:"{font_family}"',
+            f"--reader-font-size:{self.theme.font_size}px",
         )) + "}</style>"
         page = template.replace("<!-- THEME_STYLE -->", theme_style)
         page = page.replace("<!-- DOCUMENT_TITLE -->", html.escape(document.title))
@@ -957,6 +1362,8 @@ class ReaderWindow(Adw.ApplicationWindow):
             "accent": self.theme.accent,
             "selection": self.theme.selection,
             "fontFamily": self.theme.font_family,
+            "fontSize": self.theme.font_size,
+            "mode": self.theme.mode,
         }
         query = "&".join(f"{key}={quote(str(value), safe='')}" for key, value in params.items())
         self.web_view.load_uri(f"{reader_uri}?{query}")
@@ -986,6 +1393,7 @@ class ReaderWindow(Adw.ApplicationWindow):
     def _show_reader_header(self, book: Book) -> None:
         self.back_button.set_visible(True)
         self.add_button.set_visible(False)
+        self.guide_bar.set_visible(False)
         self.header.set_title_widget(Adw.WindowTitle(title=book.title, subtitle=book.author))
 
     def _show_pdf_page(self, index: int, save_progress: bool = True) -> None:
@@ -1036,7 +1444,9 @@ class ReaderWindow(Adw.ApplicationWindow):
             self._show_pdf_page(round(scale.get_value()) - 1)
 
     def _pdf_key_pressed(self, _controller, keyval, _keycode, _state) -> bool:
-        if keyval in (Gdk.KEY_Left, Gdk.KEY_Page_Up):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_Page_Up) or (
+            keyval == Gdk.KEY_space and _state & Gdk.ModifierType.SHIFT_MASK
+        ):
             self._show_pdf_page(self.pdf_page_index - 1)
             return True
         if keyval in (Gdk.KEY_Right, Gdk.KEY_Page_Down, Gdk.KEY_space):
@@ -1095,7 +1505,9 @@ class ReaderWindow(Adw.ApplicationWindow):
             self._show_comic_page(round(scale.get_value()) - 1)
 
     def _comic_key_pressed(self, _controller, keyval, _keycode, _state) -> bool:
-        if keyval in (Gdk.KEY_Left, Gdk.KEY_Page_Up):
+        if keyval in (Gdk.KEY_Left, Gdk.KEY_Page_Up) or (
+            keyval == Gdk.KEY_space and _state & Gdk.ModifierType.SHIFT_MASK
+        ):
             self._show_comic_page(self.comic_page_index - 1)
             return True
         if keyval in (Gdk.KEY_Right, Gdk.KEY_Page_Down, Gdk.KEY_space):
@@ -1123,10 +1535,12 @@ class ReaderWindow(Adw.ApplicationWindow):
         try:
             self.library.remove_book(book.id)
             self._refresh_library()
+            GLib.idle_add(self._focus_library_book, None)
         except (OSError, ValueError) as error:
             self._show_error("Could not remove the book", str(error))
 
     def _show_library(self, *_args) -> None:
+        previous_book_id = self.current_book.id if self.current_book else None
         self.current_book = None
         self.pdf_document = None
         self.comic_pages = []
@@ -1134,7 +1548,9 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.web_view.load_html("", None)
         self.back_button.set_visible(False)
         self.add_button.set_visible(True)
+        self.guide_bar.set_visible(True)
         self._refresh_library()
+        GLib.idle_add(self._focus_library_book, previous_book_id)
 
     def _go_back(self, *_args) -> None:
         self._show_library()
@@ -1156,6 +1572,10 @@ class ReaderWindow(Adw.ApplicationWindow):
             self._show_error("Could not open this book", payload.get("message", "Unknown error"))
         elif payload.get("type") == "ready":
             self.web_view.grab_focus()
+        elif payload.get("type") == "back":
+            self._show_library()
+        elif payload.get("type") == "show-help":
+            self._show_keyboard_help()
         elif payload.get("type") == "external-link":
             uri = payload.get("href", "")
             if urlsplit(uri).scheme.lower() in ("http", "https", "mailto"):

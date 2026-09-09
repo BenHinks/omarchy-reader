@@ -84,8 +84,23 @@ document.querySelector('#content').addEventListener('click', event => {
   send({ type: 'external-link', href: link.href })
 })
 document.addEventListener('keydown', event => {
-  if (event.key === 'ArrowLeft' || event.key === 'PageUp') movePage(-1)
-  if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+  if (event.key === 'F1' || (event.ctrlKey && event.key.toLowerCase() === 'g')) {
+    event.preventDefault()
+    send({ type: 'show-help' })
+    return
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    send({ type: 'back' })
+    return
+  }
+  if (event.ctrlKey || event.altKey || event.metaKey
+      || event.target.matches?.('button, input, textarea, select')
+      || event.target.isContentEditable) return
+  if (event.key === 'ArrowLeft' || event.key === 'PageUp' || (event.key === ' ' && event.shiftKey)) {
+    event.preventDefault()
+    movePage(-1)
+  } else if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
     event.preventDefault()
     movePage(1)
   }

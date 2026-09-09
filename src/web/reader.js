@@ -9,6 +9,11 @@ for (const name of ['background', 'foreground', 'accent', 'selection']) {
   const value = params.get(name)
   if (value) root.style.setProperty(`--${name}`, value)
 }
+const readerFont = params.get('fontFamily')
+const readerFontSize = Number(params.get('fontSize'))
+if (readerFont) root.style.setProperty('--reader-font', JSON.stringify(readerFont))
+if (readerFontSize) root.style.setProperty('--reader-font-size', `${readerFontSize}px`)
+root.style.colorScheme = params.get('mode') === 'light' ? 'light' : 'dark'
 
 const send = payload => {
   // WebKit exposes this handler; optional chaining keeps browser debugging safe.
@@ -50,9 +55,11 @@ const makeChapterTicks = view => {
 }
 
 const bookStyles = `
-  :root { color-scheme: dark; background: ${params.get('background')}; color: ${params.get('foreground')}; }
+  :root { color-scheme: ${params.get('mode') || 'dark'};
+          background: ${params.get('background')}; color: ${params.get('foreground')}; }
   body { color: ${params.get('foreground')} !important; background: ${params.get('background')} !important;
          font-family: ${JSON.stringify(params.get('fontFamily') || 'monospace')} !important;
+         font-size: ${Number(params.get('fontSize')) || 12}px !important;
          line-height: 1.55; padding-left: 4%; padding-right: 4%; }
   a { color: ${params.get('accent')} !important; }
   ::selection { background: ${params.get('selection')}; color: ${params.get('foreground')}; }
@@ -62,15 +69,39 @@ const bookStyles = `
 
 try {
   // foliate-view handles format parsing and pagination inside the WebKit view.
+  const bookHost = document.querySelector('#book')
   const view = document.createElement('foliate-view')
-  document.querySelector('#book').append(view)
+  bookHost.append(view)
   await view.open(params.get('book'))
   view.renderer.setAttribute('flow', 'paginated')
   view.renderer.setStyles?.(bookStyles)
+  const handleKeydown = event => {
+    if (event.key === 'F1' || (event.ctrlKey && event.key.toLowerCase() === 'g')) {
+      event.preventDefault()
+      send({ type: 'show-help' })
+      return
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      send({ type: 'back' })
+      return
+    }
+    if (event.ctrlKey || event.altKey || event.metaKey
+        || event.target.matches?.('button, input, textarea, select')
+        || event.target.isContentEditable) return
+    if (event.key === 'ArrowLeft' || event.key === 'PageUp' || (event.key === ' ' && event.shiftKey)) {
+      event.preventDefault()
+      view.goLeft()
+    } else if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') {
+      event.preventDefault()
+      view.goRight()
+    }
+  }
   view.addEventListener('load', ({ detail: { doc } }) => {
     const style = doc.createElement('style')
     style.textContent = bookStyles
     doc.head.append(style)
+    doc.addEventListener('keydown', handleKeydown)
   })
   const slider = document.querySelector('#progress-slider')
   let chapterTicks = []
@@ -128,11 +159,10 @@ try {
 
   document.querySelector('#previous').addEventListener('click', () => view.goLeft())
   document.querySelector('#next').addEventListener('click', () => view.goRight())
-  document.addEventListener('keydown', event => {
-    if (event.key === 'ArrowLeft' || event.key === 'PageUp') view.goLeft()
-    if (event.key === 'ArrowRight' || event.key === 'PageDown' || event.key === ' ') view.goRight()
-  })
-  document.querySelector('#previous').focus()
+  document.addEventListener('keydown', handleKeydown)
+  // Start in the reading surface rather than a navigation control so page
+  // shortcuts work immediately when GTK gives the WebView keyboard focus.
+  bookHost.focus({ preventScroll: true })
   send({ type: 'ready' })
 } catch (error) {
   send({ type: 'error', message: error?.message ?? String(error) })

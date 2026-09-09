@@ -1,7 +1,10 @@
 :root {
+  color-scheme: dark;
   --background: #101418;
   --foreground: #e6edf3;
   --accent: #58a6ff;
+  --reader-font: monospace;
+  --reader-font-size: 12px;
 }
 
 html, body {
@@ -11,12 +14,15 @@ html, body {
   overflow: hidden;
   background: var(--background);
   color: var(--foreground);
+  font-family: var(--reader-font);
+  font-size: var(--reader-font-size);
 }
 
 #book {
   width: 100%;
   height: calc(100% - 54px);
   overflow: hidden;
+  outline: none;
 }
 
 foliate-view { display: block; width: 100%; height: 100%; }
@@ -40,7 +46,7 @@ foliate-view { display: block; width: 100%; height: 100%; }
   border-radius: 7px;
   background: color-mix(in srgb, var(--foreground) 5%, transparent);
   color: var(--foreground);
-  font: 28px/1 system-ui, sans-serif;
+  font: 28px/1 var(--reader-font);
   cursor: pointer;
 }
 
@@ -101,6 +107,12 @@ foliate-view { display: block; width: 100%; height: 100%; }
   display: grid;
   place-items: center;
   color: var(--foreground);
-  font: 600 12px system-ui, sans-serif;
+  font: 600 1rem/1 var(--reader-font);
   pointer-events: none;
+}
+
+#progress-slider:focus-visible + #progress-label {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 12px;
 }

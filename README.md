@@ -64,8 +64,27 @@ downloads.
 
 Select a library row to resume reading. Use the on-screen previous/next controls,
 the progress slider, or the Left/Right and Page Up/Page Down keys. Space advances
-a page. EPUB-family books also show chapter marks on the progress control. TXT,
+a page and Shift+Space goes back. EPUB-family books also show chapter marks on
+the progress control. TXT,
 Markdown, and HTML documents use a themed scrolling view with page-sized jumps.
+
+The library, catalogs, downloads, dialogs, and readers can all be operated from
+the keyboard. On the library screen, Up/Down moves through Add Book, the books,
+and Guide. A focused book starts on its trailing `>` Open action: Left moves
+back through its available actions, while Right moves toward Open and opens the
+book when `>` already has focus. Enter also opens the focused book. In the
+initial Add Book screen, Left/Right switches between From File and From OPDS.
+Within a catalog, Up/Down moves through entries and Left/Right chooses among a
+book's download formats. Hierarchy rows focus their trailing `>` action; Right
+opens the next level while `>` is focused, just as Enter does. Enter activates
+the focused item and Escape moves back one level. Open the in-app keyboard guide
+with F1 or Ctrl+G, or select **Guide (F1 or Ctrl-G)** in the library screen's
+bottom bar.
+The Guide also links directly to the managed library folder in Files.
+
+Reader colors, typography, focus indicators, controls, and interaction states
+follow the active Omarchy theme. If the theme changes while Reader is open, the
+interface refreshes automatically.
 
 Text documents recognize UTF-8, byte-order-marked UTF-16/UTF-32, UTF-16 without
 a byte-order mark when its byte pattern is clear, Windows-1252, and Latin-1.

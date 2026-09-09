@@ -1,4 +1,5 @@
 :root {
+  color-scheme: dark;
   --background: #101418;
   --surface: #1b2229;
   --foreground: #e6edf3;
@@ -6,6 +7,7 @@
   --accent: #58a6ff;
   --selection: #1f4f7a;
   --reader-font: monospace;
+  --reader-font-size: 12px;
 }
 
 html, body {
@@ -17,7 +19,7 @@ html, body {
   color: var(--foreground);
 }
 
-body { font-family: var(--reader-font); }
+body { font-family: var(--reader-font); font-size: var(--reader-font-size); }
 
 #viewport {
   box-sizing: border-box;
@@ -73,7 +75,7 @@ body { font-family: var(--reader-font); }
   border-radius: 7px;
   background: color-mix(in srgb, var(--foreground) 5%, transparent);
   color: var(--foreground);
-  font: 28px/1 system-ui, sans-serif;
+  font: 28px/1 var(--reader-font);
   cursor: pointer;
 }
 
@@ -114,6 +116,12 @@ body { font-family: var(--reader-font); }
   display: grid;
   place-items: center;
   color: var(--foreground);
-  font: 600 12px system-ui, sans-serif;
+  font: 600 1rem/1 var(--reader-font);
   pointer-events: none;
+}
+
+#progress-slider:focus-visible + #progress-label {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 12px;
 }
