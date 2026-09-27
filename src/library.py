@@ -364,6 +364,10 @@ class Library:
                     username TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                );
                 """
             )
 
@@ -557,6 +561,29 @@ class Library:
             self.connection.execute(
                 "UPDATE books SET last_opened_at = CURRENT_TIMESTAMP WHERE id = ?", (book_id,)
             )
+
+    def get_setting(self, key: str) -> str | None:
+        """Return a persisted application setting, if present."""
+        row = self.connection.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ).fetchone()
+        return None if row is None else row["value"]
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Persist one application setting."""
+        with self.connection:
+            self.connection.execute(
+                """
+                INSERT INTO settings (key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, value),
+            )
+
+    def remove_setting(self, key: str) -> None:
+        """Restore an application setting to its implicit default."""
+        with self.connection:
+            self.connection.execute("DELETE FROM settings WHERE key = ?", (key,))
 
     def remove_book(self, book_id: int) -> None:
         """Remove a managed copy and its row, rolling back on database errors."""

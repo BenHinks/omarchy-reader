@@ -37,6 +37,11 @@ from theme import Theme
 
 APP_ID = "org.omarchy.Reader"
 PROJECT_DIR = Path(__file__).resolve().parent.parent
+READING_FONT_PERCENT_KEY = "reading-font-percent"
+READING_FONT_PERCENT_DEFAULT = 100
+READING_FONT_PERCENT_MIN = 70
+READING_FONT_PERCENT_MAX = 200
+READING_FONT_PERCENT_STEP = 10
 SECRET_SCHEMA = Secret.Schema.new(
     "org.omarchy.Reader.Catalog",
     Secret.SchemaFlags.NONE,
@@ -139,6 +144,17 @@ class ReaderWindow(Adw.ApplicationWindow):
         self.current_catalog: Catalog | None = None
         self.catalog_history: list[str] = []
         self.theme = Theme.load()
+        try:
+            saved_font_percent = int(
+                self.library.get_setting(READING_FONT_PERCENT_KEY)
+                or READING_FONT_PERCENT_DEFAULT
+            )
+        except ValueError:
+            saved_font_percent = READING_FONT_PERCENT_DEFAULT
+        self.reading_font_percent = min(
+            READING_FONT_PERCENT_MAX,
+            max(READING_FONT_PERCENT_MIN, saved_font_percent),
+        )
         self.theme_provider: Gtk.CssProvider | None = None
         self.theme_reload_source: int | None = None
         self.theme_monitors: list[Gio.FileMonitor] = []
@@ -577,7 +593,8 @@ class ReaderWindow(Adw.ApplicationWindow):
         return False
 
     def _show_keyboard_help(self, *_args) -> None:
-        """Show the fixed keyboard map and a concise keyboard-first guide."""
+        """Show reading settings, the keyboard map, and a concise guide."""
+        initial_font_percent = self.reading_font_percent
         dialog = Adw.Dialog(title="Keyboard & Help", content_width=620, content_height=620)
         content = Gtk.Box(
             orientation=Gtk.Orientation.VERTICAL, spacing=18,
@@ -600,6 +617,73 @@ class ReaderWindow(Adw.ApplicationWindow):
         library_link.add_css_class("flat")
         library_link.add_css_class("guide-library-link")
         content.append(library_link)
+
+        reading_group = Adw.PreferencesGroup(
+            title="Reading",
+            description=(
+                "Text size applies to reflowable ebooks and text documents after "
+                "this panel closes."
+            ),
+        )
+        size_row = Adw.ActionRow(title="Text size", activatable=False)
+        decrease = Gtk.Button(label="A−", valign=Gtk.Align.CENTER)
+        decrease.set_tooltip_text("Decrease text size")
+        size_label = Gtk.Label(
+            label=f"{self.reading_font_percent}%",
+            width_chars=5,
+            xalign=0.5,
+            valign=Gtk.Align.CENTER,
+        )
+        increase = Gtk.Button(label="A+", valign=Gtk.Align.CENTER)
+        increase.set_tooltip_text("Increase text size")
+        reset = Gtk.Button(label="Reset", valign=Gtk.Align.CENTER)
+        reset.set_tooltip_text("Use the Omarchy theme text size")
+        controls = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        for widget in (decrease, size_label, increase, reset):
+            controls.append(widget)
+        size_row.add_suffix(controls)
+        reading_group.add(size_row)
+        content.append(reading_group)
+
+        def update_size_controls() -> None:
+            size_label.set_label(f"{self.reading_font_percent}%")
+            can_decrease = self.reading_font_percent > READING_FONT_PERCENT_MIN
+            can_increase = self.reading_font_percent < READING_FONT_PERCENT_MAX
+            can_reset = self.reading_font_percent != READING_FONT_PERCENT_DEFAULT
+
+            # Move focus before disabling the control that currently owns it.
+            # Otherwise GTK can leave the dialog without a focused descendant,
+            # which prevents its normal Escape handling from taking effect.
+            if reset.has_focus() and not can_reset:
+                decrease.grab_focus()
+            elif decrease.has_focus() and not can_decrease:
+                increase.grab_focus()
+            elif increase.has_focus() and not can_increase:
+                decrease.grab_focus()
+
+            decrease.set_sensitive(can_decrease)
+            increase.set_sensitive(can_increase)
+            reset.set_sensitive(can_reset)
+
+        def adjust_size(_button, amount: int) -> None:
+            self._set_reading_font_percent(self.reading_font_percent + amount)
+            update_size_controls()
+
+        def reset_size(_button) -> None:
+            self._set_reading_font_percent(READING_FONT_PERCENT_DEFAULT)
+            decrease.grab_focus()
+            update_size_controls()
+
+        decrease.connect("clicked", adjust_size, -READING_FONT_PERCENT_STEP)
+        increase.connect("clicked", adjust_size, READING_FONT_PERCENT_STEP)
+        reset.connect("clicked", reset_size)
+        update_size_controls()
+
+        def apply_size_after_close(_dialog) -> None:
+            if self.reading_font_percent != initial_font_percent:
+                self._reload_current_text_reader()
+
+        dialog.connect("closed", apply_size_after_close)
 
         sections = (
             ("Everywhere", (
@@ -638,8 +722,43 @@ class ReaderWindow(Adw.ApplicationWindow):
         toolbar = Adw.ToolbarView()
         toolbar.add_top_bar(header)
         toolbar.set_content(scroll)
+        escape = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+
+        def close_on_escape(_controller, keyval, _keycode, _state) -> bool:
+            if keyval != Gdk.KEY_Escape:
+                return False
+            dialog.close()
+            return True
+
+        escape.connect("key-pressed", close_on_escape)
+        toolbar.add_controller(escape)
         dialog.set_child(toolbar)
         dialog.present(self)
+
+    def _set_reading_font_percent(self, percent: int) -> None:
+        """Persist a bounded content-text multiplier."""
+        percent = min(READING_FONT_PERCENT_MAX, max(READING_FONT_PERCENT_MIN, percent))
+        if percent == self.reading_font_percent:
+            return
+        self.reading_font_percent = percent
+        if percent == READING_FONT_PERCENT_DEFAULT:
+            self.library.remove_setting(READING_FONT_PERCENT_KEY)
+        else:
+            self.library.set_setting(READING_FONT_PERCENT_KEY, str(percent))
+
+    def _reload_current_text_reader(self) -> None:
+        """Reload an open reflowable or text document from its saved position."""
+        if not self.current_book or self.stack.get_visible_child_name() != "epub-reader":
+            return
+        try:
+            current = self.library.get_book(self.current_book.id)
+        except KeyError:
+            return
+        self.current_book = current
+        if f".{current.format}" in DOCUMENT_EXTENSIONS:
+            self._open_document(current)
+        else:
+            self._open_epub(current)
 
     def _refresh_library(self) -> None:
         """Rebuild the library rows from persistent state."""
@@ -1330,6 +1449,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             return
 
         font_family = self.theme.font_family.replace("\\", "\\\\").replace('"', '\\"')
+        content_font_size = self.theme.font_size * self.reading_font_percent / 100
         theme_style = "<style>:root {" + ";".join((
             f"color-scheme:{self.theme.mode}",
             f"--background:{self.theme.background}",
@@ -1340,6 +1460,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             f"--selection:{self.theme.selection}",
             f'--reader-font:"{font_family}"',
             f"--reader-font-size:{self.theme.font_size}px",
+            f"--content-font-size:{content_font_size:g}px",
         )) + "}</style>"
         page = template.replace("<!-- THEME_STYLE -->", theme_style)
         page = page.replace("<!-- DOCUMENT_TITLE -->", html.escape(document.title))
@@ -1354,6 +1475,7 @@ class ReaderWindow(Adw.ApplicationWindow):
 
     def _open_epub(self, book: Book) -> None:
         reader_uri = "reader://app/reader.html"
+        content_font_size = self.theme.font_size * self.reading_font_percent / 100
         params = {
             "book": f"reader://app/books/{quote(book.path.name)}",
             "cfi": book.progress_cfi or "",
@@ -1363,6 +1485,7 @@ class ReaderWindow(Adw.ApplicationWindow):
             "selection": self.theme.selection,
             "fontFamily": self.theme.font_family,
             "fontSize": self.theme.font_size,
+            "contentFontSize": f"{content_font_size:g}",
             "mode": self.theme.mode,
         }
         query = "&".join(f"{key}={quote(str(value), safe='')}" for key, value in params.items())

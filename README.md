@@ -65,7 +65,9 @@ downloads.
 Select a library row to resume reading. Use the on-screen previous/next controls,
 the progress slider, or the Left/Right and Page Up/Page Down keys. Space advances
 a page and Shift+Space goes back. EPUB-family books also show chapter marks on
-the progress control. TXT,
+the progress control. Open the F1 guide to adjust text size from 70% to 200% of
+the active Omarchy theme size; the setting is remembered across books and app
+restarts. TXT,
 Markdown, and HTML documents use a themed scrolling view with page-sized jumps.
 
 The library, catalogs, downloads, dialogs, and readers can all be operated from
@@ -84,7 +86,10 @@ The Guide also links directly to the managed library folder in Files.
 
 Reader colors, typography, focus indicators, controls, and interaction states
 follow the active Omarchy theme. If the theme changes while Reader is open, the
-interface refreshes automatically.
+interface refreshes automatically. In reflowable ebooks, Reader normalizes the
+font and ordinary body-text size so publisher styling cannot make chapters or
+books in a collection unexpectedly smaller or switch them to another typeface.
+Fixed-layout ebooks retain their designed typography.
 
 Text documents recognize UTF-8, byte-order-marked UTF-16/UTF-32, UTF-16 without
 a byte-order mark when its byte pattern is clear, Windows-1252, and Latin-1.

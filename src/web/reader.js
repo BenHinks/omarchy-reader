@@ -11,6 +11,7 @@ for (const name of ['background', 'foreground', 'accent', 'selection']) {
 }
 const readerFont = params.get('fontFamily')
 const readerFontSize = Number(params.get('fontSize'))
+const contentFontSize = Number(params.get('contentFontSize')) || readerFontSize || 12
 if (readerFont) root.style.setProperty('--reader-font', JSON.stringify(readerFont))
 if (readerFontSize) root.style.setProperty('--reader-font-size', `${readerFontSize}px`)
 root.style.colorScheme = params.get('mode') === 'light' ? 'light' : 'dark'
@@ -56,11 +57,26 @@ const makeChapterTicks = view => {
 
 const bookStyles = `
   :root { color-scheme: ${params.get('mode') || 'dark'};
-          background: ${params.get('background')}; color: ${params.get('foreground')}; }
+          background: ${params.get('background')}; color: ${params.get('foreground')};
+          font-size: ${contentFontSize}px !important; }
   body { color: ${params.get('foreground')} !important; background: ${params.get('background')} !important;
          font-family: ${JSON.stringify(params.get('fontFamily') || 'monospace')} !important;
-         font-size: ${Number(params.get('fontSize')) || 12}px !important;
+         font-size: 1rem !important;
          line-height: 1.55; padding-left: 4%; padding-right: 4%; }
+  body :where(*) { font-family: inherit !important; }
+  body :where(p, li, dt, dd, blockquote, figcaption, table) {
+    font-size: 1rem !important;
+    line-height: inherit;
+  }
+  body :where(h1, h2, h3, h4, h5, h6) {
+    line-height: 1.25;
+  }
+  body h1 { font-size: 2rem !important; }
+  body h2 { font-size: 1.6rem !important; }
+  body h3 { font-size: 1.35rem !important; }
+  body h4 { font-size: 1.2rem !important; }
+  body h5 { font-size: 1.1rem !important; }
+  body h6 { font-size: 1rem !important; }
   a { color: ${params.get('accent')} !important; }
   ::selection { background: ${params.get('selection')}; color: ${params.get('foreground')}; }
   img, svg { max-width: 100%; height: auto; }
@@ -74,7 +90,7 @@ try {
   bookHost.append(view)
   await view.open(params.get('book'))
   view.renderer.setAttribute('flow', 'paginated')
-  view.renderer.setStyles?.(bookStyles)
+  if (!view.isFixedLayout) view.renderer.setStyles?.(bookStyles)
   const handleKeydown = event => {
     if (event.key === 'F1' || (event.ctrlKey && event.key.toLowerCase() === 'g')) {
       event.preventDefault()
@@ -98,9 +114,11 @@ try {
     }
   }
   view.addEventListener('load', ({ detail: { doc } }) => {
-    const style = doc.createElement('style')
-    style.textContent = bookStyles
-    doc.head.append(style)
+    if (!view.isFixedLayout) {
+      const style = doc.createElement('style')
+      style.textContent = bookStyles
+      doc.head.append(style)
+    }
     doc.addEventListener('keydown', handleKeydown)
   })
   const slider = document.querySelector('#progress-slider')

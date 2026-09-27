@@ -27,6 +27,27 @@ test('EPUB reader initially focuses its reading surface', () => {
 })
 
 
+test('reflowable EPUB typography overrides publisher body text styles', () => {
+  const script = readFileSync(new URL('../src/web/reader.js', import.meta.url), 'utf8')
+
+  assert.match(script, /font-size: 1rem !important;/)
+  assert.match(script, /body :where\(\*\) \{ font-family: inherit !important; \}/)
+  assert.match(script, /body :where\(p, li, dt, dd, blockquote, figcaption, table\)/)
+  assert.match(script, /if \(!view\.isFixedLayout\) view\.renderer\.setStyles/)
+  assert.match(script, /if \(!view\.isFixedLayout\) \{/)
+  assert.match(script, /contentFontSize.*readerFontSize.*12/)
+  assert.match(script, /font-size: \$\{contentFontSize\}px !important;/)
+})
+
+
+test('document text sizing is separate from reader controls', () => {
+  const styles = readFileSync(new URL('../src/web/document.css', import.meta.url), 'utf8')
+
+  assert.match(styles, /body \{ font-family: var\(--reader-font\); font-size: var\(--reader-font-size\); \}/)
+  assert.match(styles, /#content[\s\S]*font-size: var\(--content-font-size\);/)
+})
+
+
 test('restores progress and saves slider seeks', async () => {
   const windowListeners = {}
   const documentListeners = {}

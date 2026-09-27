@@ -117,6 +117,21 @@ class LibraryTests(unittest.TestCase):
             with self.assertRaises(InvalidEpub):
                 read_epub_metadata(path)
 
+    def test_persists_application_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            library = Library(root / "data", root / "Books")
+            self.assertIsNone(library.get_setting("reading-font-percent"))
+            library.set_setting("reading-font-percent", "130")
+            library.set_setting("reading-font-percent", "140")
+            library.connection.close()
+
+            reopened = Library(root / "data", root / "Books")
+            self.assertEqual(reopened.get_setting("reading-font-percent"), "140")
+            reopened.remove_setting("reading-font-percent")
+            self.assertIsNone(reopened.get_setting("reading-font-percent"))
+            reopened.connection.close()
+
     def test_reads_imports_and_deduplicates_pdf(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

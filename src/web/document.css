@@ -8,6 +8,7 @@
   --selection: #1f4f7a;
   --reader-font: monospace;
   --reader-font-size: 12px;
+  --content-font-size: var(--reader-font-size);
 }
 
 html, body {
@@ -35,7 +36,7 @@ body { font-family: var(--reader-font); font-size: var(--reader-font-size); }
   min-height: 100%;
   margin: 0 auto;
   padding: 48px 42px 72px;
-  font-size: 1rem;
+  font-size: var(--content-font-size);
   line-height: 1.65;
   overflow-wrap: anywhere;
 }
